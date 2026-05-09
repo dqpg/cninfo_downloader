@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CNinfo-Local-Sync V2
-功能: 动态解析股票，支持自定义年份、下载类型及保存目录。
-致谢: 本项目受 jarodise/CNinfo2Notebookllm 启发并在其基础上修改重构。
+CNinfo-Local-Sync (小白交互向导版)
+功能: 一问一答式输入参数，自动处理默认值，双击即可流畅运行。
 """
 
 import sys
@@ -11,7 +10,6 @@ import os
 import datetime
 import time
 import random
-import re
 import argparse
 import httpx
 
@@ -43,7 +41,7 @@ class CnInfoLocalSpider:
                 market = "hke" if item.get("category") == "HKH" else "szse"
                 return {"code": item["code"], "name": item["zwjc"], "orgId": item["orgId"], "market": market}
         except Exception as e:
-            print(f"解析股票失败: {e}")
+            pass # 静默错误
         return {}
 
     def _fetch_api(self, stock_info, start_date, end_date, category):
@@ -79,18 +77,21 @@ class CnInfoLocalSpider:
         except:
             print(f"  ❌ 失败: {filename}")
 
-    def sync(self, keyword, years, dl_type):
+    def sync(self, keyword, p_years, i_years):
         stock = self.resolve_stock(keyword)
-        if not stock: return False, keyword
-        print(f"📊 目标: {stock['code']} ({stock['name']})")
+        if not stock: 
+            print(f"❌ 解析失败: {keyword}")
+            return False, keyword
+            
+        print(f"\n📊 目标: {stock['code']} ({stock['name']})")
         out_dir = os.path.join(self.base_dir, f"{stock['code']}_{stock['name']}")
         os.makedirs(out_dir, exist_ok=True)
 
-        # 阶段一：定期报告
-        if dl_type in ['P', 'B']:
-            print(f"  📥 提取定期财报 ({years})...")
+        # ================= 阶段一：定期报告 =================
+        if p_years:
+            print(f"  📥 提取定期财报 ({min(p_years)}-{max(p_years)})...")
             cats = "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_sjdbg_szsh"
-            for y in years:
+            for y in p_years:
                 reports = self._fetch_api(stock, f"{y}-01-01", f"{y+1}-06-30", cats)
                 for ann in reports:
                     t = ann["announcementTitle"]
@@ -100,41 +101,111 @@ class CnInfoLocalSpider:
                     fname = f"{stock['code']}_{stock['name']}_{y}_{q}_报告{rev}.pdf"
                     self._download(ann, out_dir, fname)
 
-        # 阶段二：重要公告
-        if dl_type in ['I', 'B']:
-            start_y = min(years) if years else datetime.datetime.now().year - 3
+        # ================= 阶段二：重要公告 =================
+        if i_years:
+            start_y = min(i_years)
             print(f"  📥 捕获重大事件 ({start_y}至今)...")
             events = self._fetch_api(stock, f"{start_y}-01-01", f"{datetime.datetime.now().year}-12-31", "")
-            core = {"问询函": "监管", "关注函": "监管", "业绩预告": "业绩", "股权激励": "激励", "重大合同": "业务", "定增": "资本"}
+            core = {
+                "问询函": "监管", "关注函": "监管", "警示函": "监管", "立案": "监管",
+                "业绩预告": "业绩", "业绩快报": "业绩", "分红": "分红", "利润分配": "分红",
+                "股权激励": "激励", "员工持股": "激励", "增持": "筹码", "减持": "筹码",
+                "计提": "风险", "减值": "风险", "诉讼": "风险", 
+                "重大合同": "业务", "中标": "业务", "战略合作": "业务",
+                "重组": "资本", "收购": "资本", "定增": "资本", "募集": "资本"
+            }
             for ann in events:
                 t = ann["announcementTitle"]
                 hit = next((k for k in core if k in t), None)
-                if hit and not any(x in t for x in ["摘要", "取消"]):
+                if hit and not any(x in t for x in ["摘要", "取消", "提示性", "补充"]):
                     pub = time.strftime("%Y%m%d", time.localtime(ann["announcementTime"]/1000))
-                    fname = f"{pub}_{t}_{core[hit]}.pdf"
+                    clean_t = t.replace("/", "-").replace("\\", "-").replace(":", "：").replace("*", "")
+                    fname = f"{pub}_{clean_t}_{core[hit]}.pdf"
                     self._download(ann, out_dir, fname)
+                    
         return True, stock
 
 def parse_years(year_arg):
+    if not year_arg: return []
     if '-' in year_arg:
         s, e = map(int, year_arg.split('-'))
         return list(range(s, e + 1))
     return [int(y) for y in year_arg.split(',')]
 
-if __name__ == "__main__":
-    default_doc = os.path.join(os.path.expanduser("~"), "Documents", "Reports")
-    parser = argparse.ArgumentParser(description="巨潮资讯本地同步工具 V2")
-    parser.add_argument("keyword", help="股票代码、简称或TXT文件路径")
-    parser.add_argument("--years", default=f"{datetime.datetime.now().year-3}-{datetime.datetime.now().year}", help="年份: 2021-2025 或 2022,2024")
-    parser.add_argument("--type", choices=['P', 'I', 'B'], default='B', help="P:定期, I:重要, B:两者")
-    parser.add_argument("--out", default=default_doc, help="保存目录")
-    args = parser.parse_args()
+def interactive_wizard():
+    print("="*60)
+    print(" 🚀 巨潮资讯 A股财报/公告 智能下载器")
+    print("="*60)
 
-    spider = CnInfoLocalSpider(args.out)
-    target_years = parse_years(args.years)
+    curr_year = datetime.datetime.now().year
+    default_out = os.path.join(os.path.expanduser("~"), "Documents", "Reports")
+
+    # 1. 获取股票代码
+    keyword = ""
+    while not keyword:
+        keyword = input("\n👉 1. 请输入股票代码、简称 (或TXT批量文件路径): ").strip()
+
+    # 2. 选择下载模式
+    mode_map = {'1': 'P', '2': 'I', '3': 'B'}
+    print("\n👉 2. 请选择下载模式:")
+    print("   [1] 仅下载 定期财报")
+    print("   [2] 仅下载 重要公告 (排雷/业务增量)")
+    print("   [3] 两者全要")
+    mode_choice = input("   请输入序号 [直接回车默认 3]: ").strip()
+    dl_mode = mode_map.get(mode_choice, 'B')
+
+    p_years = []
+    i_years = []
+
+    # 3. 询问定期报告年份
+    if dl_mode in ['P', 'B']:
+        default_p = f"{curr_year-5}-{curr_year}"
+        p_in = input(f"\n👉 3a. 定期财报年份区间 (直接回车默认 {default_p}): ").strip()
+        p_years = parse_years(p_in if p_in else default_p)
+
+    # 4. 询问重要公告年份
+    if dl_mode in ['I', 'B']:
+        default_i = f"{curr_year-3}-{curr_year}"
+        i_in = input(f"\n👉 3b. 重要公告年份区间 (直接回车默认 {default_i}): ").strip()
+        i_years = parse_years(i_in if i_in else default_i)
+
+    # 5. 存储路径
+    out_dir = input(f"\n👉 4. 保存目录 (直接回车默认 {default_out}): ").strip()
+    if not out_dir:
+        out_dir = default_out
+
+    print("\n" + "="*60)
+    print("⏳ 参数配置完毕，开始执行下载任务...")
+    print("="*60 + "\n")
+
+    spider = CnInfoLocalSpider(out_dir)
     
-    if args.keyword.lower().endswith('.txt'):
-        with open(args.keyword, 'r', encoding='utf-8') as f:
-            for line in f: spider.sync(line.strip(), target_years, args.type)
+    if keyword.lower().endswith('.txt') and os.path.exists(keyword):
+        success_list, fail_list = [], []
+        with open(keyword, 'r', encoding='utf-8') as f:
+            for line in f:
+                kw = line.strip()
+                if not kw: continue
+                print(f"\n▶️ 处理目标: {kw}")
+                ok, res = spider.sync(kw, p_years, i_years)
+                if ok: success_list.append(res)
+                else: fail_list.append(kw)
+        
+        print("\n" + "█"*60)
+        print(f"✅ 成功: {len(success_list)} 家 | ❌ 失败: {len(fail_list)} 家")
+        print("█"*60)
     else:
-        spider.sync(args.keyword, target_years, args.type)
+        spider.sync(keyword, p_years, i_years)
+        
+    print("\n🎉 任务全部结束！文件已保存在:", out_dir)
+    # 防止双击运行时窗口一闪而过退出
+    input("\n按回车键退出程序...")
+
+if __name__ == "__main__":
+    # 如果用户还是习惯用命令行传参，也做了兼容，如果没参数就启动向导
+    if len(sys.argv) > 1:
+        print("⚠️ 检测到命令行参数，但本版本主推交互向导。")
+        print("💡 请直接双击运行脚本，或不带参数执行 `python sync_reports.py`")
+        sys.exit(0)
+    
+    interactive_wizard()
